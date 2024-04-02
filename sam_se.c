@@ -43,11 +43,10 @@ static int auto_season;
 static int airport_loaded;
 
 static XPLMDataRef date_day_dr, latitude_dr;
-static int cur_day = 999;
 static int nh;     // on northern hemisphere
-static int cached_day = 999;
 static int season; // 0-3
-static const char *season_str[] = {"win", "spr", "sum", "fal"};
+static const char *dr_name[] = {"sam/season/winter", "sam/season/spring",
+            "sam/season/summer", "sam/season/autumn"};
 
 static void
 log_msg(const char *fmt, ...)
@@ -70,10 +69,12 @@ save_pref()
     if (NULL == f)
         return;
 
-    /* encode southern hemisphere with negative days */
-    int d = nh ? cur_day : -cur_day;
-    fprintf(f, "%d,%d,%d", auto_season, d, season);
+    /* encode southern hemisphere with negative season */
+    int s = nh ? season : -season;
+    fprintf(f, "%d,%d", auto_season, s);
     fclose(f);
+
+    log_msg("Saving pref auto_season: %d, season: %d", auto_season, s);
 }
 
 static void
@@ -84,19 +85,20 @@ load_pref()
         return;
 
     nh = 1;
-    if (3 == fscanf(f, "%i,%i,%i", &auto_season, &cached_day, &season))
-        log_msg("From pref: auto_season: %d, cached_day: %d, seasons: %d",
-                auto_season, cached_day, season);
+    if (2 == fscanf(f, "%i,%i", &auto_season, &season))
+        log_msg("From pref: auto_season: %d, seasons: %d",
+                auto_season,  season);
     else {
         auto_season = 0;
-        log_msg("Error readinf pref");
+        season = 0;
+        log_msg("Error reading pref");
     }
 
     fclose(f);
 
-    if (cached_day < 0) {
+    if (season < 0) {
         nh = 0;
-        cached_day = -cached_day;
+        season = -season;
     }
 }
 
@@ -107,17 +109,18 @@ read_season_acc(void *ref)
     int s = (long long)ref;
     int val = (s == season);
 
-    //log_msg("accessor %s called, returns %d", season_str[s], val);
+    log_msg("accessor %s called, returns %d", dr_name[s], val);
     return val;
 }
 
 // set season according to date
 static void
-set_season_auto(int day)
+set_season_auto()
 {
     if (! auto_season)
         return;
 
+    int day = XPLMGetDatai(date_day_dr);
     if (nh) {
         if (day <= 80) {
             season = 0;
@@ -144,8 +147,7 @@ set_season_auto(int day)
         }
     }
 
-    log_msg("nh: %d, day: %d->%d, season: %d", nh, cur_day, day, season);
-    cur_day = day;
+    log_msg("nh: %d, day: %d, season: %d", nh, day, season);
 }
 
 // emuluate a kind of radio buttons
@@ -154,35 +156,32 @@ set_menu()
 {
     XPLMCheckMenuItem(menu_id, auto_item,
                       auto_season ? xplm_Menu_Checked : xplm_Menu_Unchecked);
-    if (auto_season) {
-        for (int i = 0; i < 4; i++)
+
+    XPLMCheckMenuItem(menu_id, season_item[season], xplm_Menu_Checked);
+    for (int i = 0; i < 4; i++)
+        if (i != season)
             XPLMCheckMenuItem(menu_id, season_item[i], xplm_Menu_Unchecked);
-    } else {
-        XPLMCheckMenuItem(menu_id, season_item[season], xplm_Menu_Checked);
-        for (int i = 0; i < 4; i++)
-            if (i != season)
-                XPLMCheckMenuItem(menu_id, season_item[i], xplm_Menu_Unchecked);
-    }
 }
 
 static void
 menu_cb(void *menu_ref, void *item_ref)
 {
     int entry = (long long)item_ref;
+
     if (entry == 4) {
         auto_season = !auto_season;
-        set_season_auto(XPLMGetDatai(date_day_dr));
+        set_season_auto();
     } else {
         int checked;
         XPLMCheckMenuItemState(menu_id, season_item[entry], &checked);
-        if (checked == 0) { // unchecking means auto
-            auto_season = 1;
-            set_season_auto(XPLMGetDatai(date_day_dr));
-        } else {
-            auto_season = 0;
+        log_msg("menu_cb: entry %d, checked: %d", entry, checked);
+
+        if (checked == 1 && entry != season) { // checking a prior unchecked entry
             season = entry;
-        }
-    }
+        } /* else nothing, unchecking is not possible */
+
+        auto_season = 0;    // selecting a season always goes to manual mode
+   }
 
     set_menu();
     save_pref();
@@ -226,22 +225,11 @@ XPluginStart(char *out_name, char *out_sig, char *out_desc)
     date_day_dr = XPLMFindDataRef("sim/time/local_date_days");
     latitude_dr = XPLMFindDataRef("sim/flightmodel/position/latitude");
 
-
-    XPLMRegisterDataAccessor("sam/season/winter", xplmType_Int, 0, read_season_acc,
-                             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                             NULL, NULL, NULL, (void *)0, NULL);
-
-    XPLMRegisterDataAccessor("sam/season/spring", xplmType_Int, 0, read_season_acc,
-                             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                             NULL, NULL, NULL, (void *)1, NULL);
-
-    XPLMRegisterDataAccessor("sam/season/summer", xplmType_Int, 0, read_season_acc,
-                             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                             NULL, NULL, NULL, (void *)2, NULL);
-
-    XPLMRegisterDataAccessor("sam/season/autumn", xplmType_Int, 0, read_season_acc,
-                             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                             NULL, NULL, NULL, (void *)3, NULL);
+    // create the sam datarefs
+    for (int i = 0; i < 4; i++)
+        XPLMRegisterDataAccessor(dr_name[i], xplmType_Int, 0, read_season_acc,
+                                 NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                 NULL, NULL, NULL, (void *)(long long)i, NULL);
 
     return 1;
 }
@@ -274,8 +262,7 @@ XPluginReceiveMessage(XPLMPluginID in_from, long in_msg, void *in_param)
     if ((in_msg == XPLM_MSG_AIRPORT_LOADED) ||
         (airport_loaded && (in_msg == XPLM_MSG_SCENERY_LOADED))) {
         airport_loaded = 1;
-        int day = XPLMGetDatai(date_day_dr);
         nh = (XPLMGetDatad(latitude_dr) >= 0.0);
-        set_season_auto(day);
+        set_season_auto();
     }
 }
